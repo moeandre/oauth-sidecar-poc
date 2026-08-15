@@ -24,13 +24,17 @@ public class SecurityConfig {
 
     /**
      * Qualquer chamada que chegue ao sidecar (exceto health) exige um login
-     * OAuth2/OIDC valido. Se nao houver sessao autenticada, o Spring Security
-     * ja redireciona automaticamente para o Keycloak (fluxo Authorization Code) -
-     * isso e o "iniciar o processo de oauth" para quem nunca autenticou.
-     * A checagem fina de escopo por rota/metodo fica no ProxyController.
+     * OAuth2/OIDC valido. Se nao houver sessao autenticada, o
+     * RouteAwareAuthenticationEntryPoint decide, pelo path pedido, para qual
+     * client-id (por microservico) redirecionar - isso e o "iniciar o
+     * processo de oauth" para quem nunca autenticou. A checagem fina de
+     * escopo/authorized-client por rota fica no ProxyController (que tambem
+     * cobre o caso de trocar de rota/client dentro de uma sessao ja logada).
      */
     @Bean
-    public SecurityFilterChain filterChain(HttpSecurity http, ClientRegistrationRepository clientRegistrationRepository) throws Exception {
+    public SecurityFilterChain filterChain(HttpSecurity http,
+                                            ClientRegistrationRepository clientRegistrationRepository,
+                                            SidecarProperties sidecarProperties) throws Exception {
         http
             .authorizeHttpRequests(auth -> auth
                 .requestMatchers("/actuator/health").permitAll()
@@ -38,6 +42,8 @@ public class SecurityConfig {
             .oauth2Login(oauth -> oauth
                 .authorizationEndpoint(endpoint ->
                         endpoint.authorizationRequestResolver(stepUpResolver(clientRegistrationRepository))))
+            .exceptionHandling(exceptions -> exceptions
+                    .authenticationEntryPoint(new RouteAwareAuthenticationEntryPoint(sidecarProperties)))
             .cors(cors -> cors.configurationSource(corsConfigurationSource()))
             .logout(logout -> logout
                 .logoutSuccessHandler(oidcLogoutSuccessHandler())

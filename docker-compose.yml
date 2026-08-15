@@ -30,6 +30,12 @@ services:
     networks:
       - poc-net
 
+  billing-service:
+    build: ./billing-service
+    container_name: billing-service
+    # Mesmo isolamento do crud-service: não publicado no host, só o sidecar acessa.
+    networks:
+      - poc-net
 
   oauth-sidecar:
     build: ./oauth-sidecar
@@ -39,10 +45,17 @@ services:
         condition: service_healthy
       crud-service:
         condition: service_started
+      billing-service:
+        condition: service_started
     ports:
       - "8082:8082"
     networks:
       - poc-net
+    # A tabela de rotas (path protegido -> backend -> escopo por verbo) vem do
+    # application.yml (ver "sidecar.routes" e SidecarProperties). Uma rota
+    # isolada pode ser sobrescrita aqui via environment sem recompilar, ex.:
+    #   SIDECAR_ROUTES_1_BACKENDBASEURL: http://billing-service:9090
+    #   SIDECAR_ROUTES_1_SCOPES_MAPPING_GET: read
 
 networks:
   poc-net:

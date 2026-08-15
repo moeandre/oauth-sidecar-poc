@@ -8,11 +8,26 @@ spring:
     oauth2:
       client:
         registration:
-          keycloak:
-            client-id: sidecar-client
-            client-secret: sidecar-secret
+          # Um client-id por microservico, cada um com seus proprios escopos
+          # (ver keycloak/realm-export.json). "write"/"read" nao entram aqui
+          # de proposito: cada client so pede o escopo "*-read" (silencioso,
+          # default) de antemao; "*-write" so e solicitado no momento do
+          # step-up (ver StepUpAuthorizationRequestResolver e ProxyController),
+          # para o Keycloak so exibir o escopo que realmente esta sendo
+          # pedido naquele momento, e nao sempre.
+          tasks-client:
+            provider: keycloak
+            client-id: tasks-client
+            client-secret: tasks-secret
             authorization-grant-type: authorization_code
-            scope: openid,read,write
+            scope: openid,task:read
+            redirect-uri: "{baseUrl}/login/oauth2/code/{registrationId}"
+          billing-client:
+            provider: keycloak
+            client-id: billing-client
+            client-secret: billing-secret
+            authorization-grant-type: authorization_code
+            scope: openid,billing:read
             redirect-uri: "{baseUrl}/login/oauth2/code/{registrationId}"
         provider:
           keycloak:
@@ -22,8 +37,39 @@ spring:
             #issuer-uri: http://host.docker.internal:8080/realms/poc-realm
 
 sidecar:
-  backend:
-    base-url: http://crud-service:8081
+  # Tabela de roteamento: path protegido -> backend -> client OAuth2 (client-id
+  # proprio do microservico) -> politica de escopo por verbo HTTP. Nada disso
+  # esta em codigo (ver SidecarProperties/ProxyController); adicionar um novo
+  # componente atras do sidecar e so acrescentar uma entrada aqui (e o client
+  # correspondente em spring.security.oauth2.client.registration acima, e em
+  # keycloak/realm-export.json) - ou sobrescrever via variavel de ambiente,
+  # ex.: SIDECAR_ROUTES_0_SCOPES_MAPPING_GET=task:read.
+  routes:
+    - path: /api/tasks
+      backend-base-url: http://crud-service:8081
+      client-registration-id: tasks-client
+      scopes:
+        # Escopo exigido quando o metodo HTTP nao aparece no mapa abaixo.
+        default-scope: task:write
+        mapping:
+          GET: task:read
+          HEAD: task:read
+          POST: task:write
+          PUT: task:write
+          PATCH: task:write
+          DELETE: task:write
+    - path: /api/billing
+      backend-base-url: http://billing-service:8083
+      client-registration-id: billing-client
+      scopes:
+        default-scope: billing:write
+        mapping:
+          GET: billing:read
+          HEAD: billing:read
+          POST: billing:write
+          PUT: billing:write
+          PATCH: billing:write
+          DELETE: billing:write
 
 management:
   endpoints:
