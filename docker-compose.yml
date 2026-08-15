@@ -1,0 +1,25 @@
+version: "3.9"
+
+services:
+  crud-service:
+    build: ./crud-service
+    container_name: crud-service
+    networks:
+      - poc-net
+    # Não publicamos porta no host de propósito: só o sidecar deve falar com esse serviço.
+
+  oauth-sidecar:
+    build: ./oauth-sidecar
+    container_name: oauth-sidecar
+    depends_on:
+      crud-service:
+        condition: service_started
+    ports:
+      - "8082:8082"
+    networks:
+      - poc-net
+
+networks:
+  poc-net:
+    #driver: bridge
+    external: true

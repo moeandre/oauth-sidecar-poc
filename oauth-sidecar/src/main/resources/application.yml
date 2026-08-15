@@ -1,0 +1,37 @@
+server:
+  port: 8082
+
+spring:
+  application:
+    name: oauth-sidecar
+  security:
+    oauth2:
+      client:
+        registration:
+          keycloak:
+            client-id: sidecar-client
+            client-secret: sidecar-secret
+            authorization-grant-type: authorization_code
+            scope: openid,read,write
+            redirect-uri: "{baseUrl}/login/oauth2/code/{registrationId}"
+        provider:
+          keycloak:
+            # Mesmo hostname usado pelo navegador (host) e pelos containers,
+            # ver README para o ajuste necessario no /etc/hosts.
+            issuer-uri: http://keycloak:8080/realms/poc-realm
+            #issuer-uri: http://host.docker.internal:8080/realms/poc-realm
+
+sidecar:
+  backend:
+    base-url: http://crud-service:8081
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+
+logging:
+  level:
+    com.poc.sidecar: DEBUG
+    org.springframework.security: INFO
