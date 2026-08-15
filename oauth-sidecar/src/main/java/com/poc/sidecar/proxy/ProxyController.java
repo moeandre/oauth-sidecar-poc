@@ -6,9 +6,11 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.oauth2.client.OAuth2AuthorizedClient;
 import org.springframework.security.oauth2.client.annotation.RegisteredOAuth2AuthorizedClient;
 import org.springframework.security.oauth2.core.oidc.user.OidcUser;
+import org.springframework.web.bind.annotation.CrossOrigin;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
@@ -32,6 +34,7 @@ import java.util.Set;
  * consentimento adicional (step-up), em vez de simplesmente barrar com 403.
  */
 @RestController
+@CrossOrigin(origins = "*")
 public class ProxyController {
 
     private final RestClient backendClient;
@@ -45,7 +48,7 @@ public class ProxyController {
                                          HttpServletResponse response,
                                          @RequestBody(required = false) byte[] body,
                                          @RegisteredOAuth2AuthorizedClient("keycloak") OAuth2AuthorizedClient authorizedClient,
-                                         OidcUser oidcUser) throws IOException {
+                                         @AuthenticationPrincipal OidcUser oidcUser) throws IOException {
 
         String httpMethod = request.getMethod();
         String requiredScope = requiredScopeFor(httpMethod);

@@ -1,0 +1,57 @@
+{
+  "realm": "poc-realm",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "clientScopes": [
+    {
+      "name": "read",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false"
+      }
+    },
+    {
+      "name": "write",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "true",
+        "consent.screen.text": "Permitir criar, editar e excluir tarefas (escrita)"
+      }
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "sidecar-client",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "sidecar-secret",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "consentRequired": true,
+      "redirectUris": ["http://localhost:8082/*"],
+      "webOrigins": ["http://localhost:8082"],
+      "defaultClientScopes": ["profile", "roles", "web-origins", "read"],
+      "optionalClientScopes": ["write", "offline_access"]
+    }
+  ],
+  "users": [
+    {
+      "username": "demo",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "demo@example.com",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "demo123",
+          "temporary": false
+        }
+      ]
+    }
+  ]
+}
