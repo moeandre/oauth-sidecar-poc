@@ -1,5 +1,12 @@
 server:
   port: 8082
+  #tunning no tomcat
+  tomcat:
+    threads:
+      max: 200
+      min-spare: 20
+    accept-count: 100
+    max-connections: 8192
 
 spring:
   application:
@@ -35,6 +42,15 @@ spring:
             # ver README para o ajuste necessario no /etc/hosts.
             issuer-uri: http://keycloak:8080/realms/poc-realm
             #issuer-uri: http://host.docker.internal:8080/realms/poc-realm
+  #habilita thread cirtuais
+  threads:
+    virtual:
+      enabled: true
+  #limita conexões http por padrão
+  http:
+    client:
+      connect-timeout: 2s
+      read-timeout: 3s
 
 sidecar:
   # Tabela de roteamento: path protegido -> backend -> client OAuth2 (client-id
