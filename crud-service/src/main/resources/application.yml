@@ -4,6 +4,14 @@ server:
 spring:
   application:
     name: crud-service
+  mvc:
+    # Sem isso, o DispatcherServlet so inicializa (custo de ~1s+, fora do JIT
+    # warmup normal) na PRIMEIRA requisicao real - descoberto revisando o
+    # oauth-sidecar: com timeout de leitura de poucos segundos no proxy que
+    # fica na frente deste servico, a primeira chamada apos um deploy/restart
+    # podia estourar o timeout e falhar. Inicializa no startup em vez disso.
+    servlet:
+      load-on-startup: 1
   datasource:
     url: jdbc:h2:mem:tasksdb;DB_CLOSE_DELAY=-1
     driver-class-name: org.h2.Driver

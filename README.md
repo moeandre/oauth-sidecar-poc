@@ -163,13 +163,21 @@ independente de existir rota para o path).
   `spring.security.oauth2.client.registration` e o client no
   `realm-export.json` — sem recompilar nada.
 - `oauth-sidecar/.../proxy/ProxyController.java` — é o **interceptor**:
-  resolve qual rota configurada bate com o path da requisição, busca o
-  `OAuth2AuthorizedClient` do client daquela rota (via
-  `OAuth2AuthorizedClientRepository`, já que o client varia por rota e não
-  dá mais para fixar via `@RegisteredOAuth2AuthorizedClient`), decide o
-  escopo exigido por método HTTP, valida contra o access token e faz o
-  proxy para o backend correspondente, ou dispara o (re)início de OAuth
-  para aquele client. Path sem rota configurada → `404`.
+  resolve qual rota configurada bate com o path da requisição, pede ao
+  `OAuth2AuthorizedClientManager` o `OAuth2AuthorizedClient` do client
+  daquela rota (já que o client varia por rota e não dá mais para fixar via
+  `@RegisteredOAuth2AuthorizedClient`; o manager também renova o token
+  sozinho via `refresh_token` quando expira — ver bean em
+  `SecurityConfig`), decide o escopo exigido por método HTTP, valida contra
+  o access token e faz o proxy para o backend correspondente, ou dispara o
+  (re)início de OAuth para aquele client. Path sem rota configurada → `404`.
+  Também roda um warm-up best-effort por rota no startup (`ApplicationReadyEvent`),
+  pra evitar que a primeira requisição real esbarre no timeout por causa da
+  inicialização lenta do backend (ver seção 6).
+- `oauth-sidecar/.../config/RestClientConfig.java` — o `RestClient.Builder`
+  usado por toda rota, com `spring.http.client.connect-timeout`/`read-timeout`
+  de fato aplicados (o `RestClient.create(url)` usado antes os ignorava
+  silenciosamente).
 - `crud-service/.../controller/TaskController.java` e
   `billing-service/.../controller/BillingController.java` — CRUD puro, sem
   nenhuma linha de código de segurança; cada um só existe na rede interna
@@ -188,6 +196,72 @@ independente de existir rota para o path).
   validar); em vez disso propagamos identidade via headers
   `X-Auth-User` / `X-Auth-Scopes` — um passo further seria assinar/cifrar
   esses headers ou usar mTLS entre sidecar e serviço.
-- Sem refresh automático de token expirado nesta versão — para produção,
-  o `spring-boot-starter-oauth2-client` já dá suporte a isso via
-  `OAuth2AuthorizedClientManager` com `refresh_token`.
+- Sessão HTTP em memória (padrão do Tomcat) — funciona com uma única
+  instância do sidecar. Escalando horizontalmente, é necessário sessão
+  compartilhada (ex.: Spring Session + Redis) ou afinidade de sessão no
+  load balancer, senão um usuário autenticado num pod perde a sessão ao
+  cair noutro.
+- Corpo de requisição/resposta do proxy é bufferizado inteiro em memória
+  (`byte[]`) — adequado para os payloads pequenos desta PoC; um proxy
+  genérico para produção normalmente faz streaming para não bufferizar
+  uploads/downloads grandes.
+- Sem circuit breaker/retry entre o sidecar e os backends — um backend
+  lento ainda falha rápido graças ao timeout (ver seção 6), mas nada evita
+  reenviar tráfego pra um backend que está caindo repetidamente.
+
+## 6. Performance e produção
+
+Revisão feita com foco num alvo de **500 TPS**. Resumo do que foi
+encontrado e corrigido — detalhes nos comentários dos arquivos citados:
+
+- **Timeout dos clients HTTP não tinha efeito nenhum.** `RestClient.create(url)`
+  ignora `spring.http.client.*`; sem isso, uma chamada presa a um backend
+  fora do ar ficava pendurada até o timeout de TCP do SO (~60s+), prendendo
+  uma thread por chamada. Corrigido em `RestClientConfig.java` (verificado
+  isoladamente: conexão a um IP não roteável falha em ~2,7s, não trava).
+- **Refresh automático de token.** Trocado o acesso direto ao
+  `OAuth2AuthorizedClientRepository` por `OAuth2AuthorizedClientManager`
+  com `refreshToken()` — token expirado é renovado via `refresh_token` sem
+  exigir novo login interativo.
+- **Cold start dos backends podia estourar o timeout.** A primeira
+  requisição real ao `crud-service`/`billing-service` chegou a levar ~10s
+  (inicialização lazy do `DispatcherServlet` + primeira query JPA) — mais
+  que o timeout de leitura do proxy. Corrigido com
+  `spring.mvc.servlet.load-on-startup=1` nos dois serviços (paga o custo no
+  startup, não na primeira requisição de um usuário) e um warm-up
+  best-effort no sidecar ao subir.
+- **Threads virtuais habilitadas** (`spring.threads.virtual.enabled`) — bom
+  encaixe pra um proxy dominado por I/O bloqueante; nesse modo,
+  `server.tomcat.threads.max`/`min-spare` deixam de ter efeito (o conector
+  passa a usar um executor de thread virtual) — mantidos só como
+  documentação/fallback.
+- **Observabilidade.** `/actuator/prometheus`+`/actuator/metrics` numa
+  porta de management separada (`9090`, não publicada no host, mesmo
+  padrão do `crud-service`/`billing-service`) — sem isso não dava pra medir
+  nada disto em produção. `/actuator/**` só é liberado quando a requisição
+  chega por essa porta (verificado: mesmo com porta de management
+  diferente, o `SecurityFilterChain` do app se aplicava às duas por
+  padrão nesta versão do Boot).
+- **Memória do container.** `-XX:MaxRAMPercentage=75.0` (heap acompanha o
+  limite do cgroup) e `-XX:+ExitOnOutOfMemoryError` (falha rápido e deixa o
+  orquestrador reiniciar, em vez de um processo degradado servindo erro
+  silenciosamente) no `Dockerfile`; limites de CPU/memória no `docker-compose.yml`
+  (ponto de partida, não resultado de teste de carga).
+- **Segredos e CORS.** `client-secret` dos dois clients agora vem de env var
+  (`TASKS_CLIENT_SECRET`/`BILLING_CLIENT_SECRET`, com default só pra dev);
+  origens CORS externalizadas (`sidecar.cors.allowed-origins`, "*" só em
+  dev).
+- **Sessão HTTP.** Timeout explícito (`server.servlet.session.timeout`) —
+  sem isso, sessões esquecidas (cada uma guarda um `OAuth2AuthorizedClient`
+  por client-registration) se acumulam no heap sem teto.
+- **Logging.** Nível default do pacote do sidecar voltou a `INFO` (era
+  `DEBUG`) — custo de I/O e risco de log verboso sob volume alto;
+  sobrescrevível via `LOGGING_LEVEL_COM_POC_SIDECAR` sem rebuild.
+
+**Não coberto por esta revisão** (fora do escopo do `oauth-sidecar`, ou
+decisão maior que exige validação própria): teste de carga de verdade
+(k6/Gatling/JMeter — os números acima são pontos de partida, não
+resultados medidos); capacidade do `crud-service`/`billing-service` em si
+(H2 em memória de instância única, pool do Hikari no default);
+streaming de corpo grande; circuit breaker/retry; sessão compartilhada
+entre múltiplas instâncias do sidecar.

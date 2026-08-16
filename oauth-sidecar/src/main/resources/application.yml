@@ -1,12 +1,27 @@
 server:
   port: 8082
   #tunning no tomcat
+  # OBS: com spring.threads.virtual.enabled=true (abaixo), o conector do
+  # Tomcat passa a usar um executor de thread virtual, e "threads.max"/
+  # "min-spare" (que configuram o pool de threads PLATAFORMA) deixam de ter
+  # efeito pratico - quem ainda vale e "accept-count" (fila de conexoes
+  # aguardando aceitar) e "max-connections" (teto de conexoes simultaneas),
+  # que atuam no nivel de socket/conexao, nao de thread. Mantidos aqui como
+  # documentacao/fallback caso as threads virtuais sejam desligadas depois.
   tomcat:
     threads:
       max: 200
       min-spare: 20
     accept-count: 100
     max-connections: 8192
+  servlet:
+    session:
+      # Explicito para nao depender do default do Tomcat (30min): sessao
+      # guarda os OAuth2AuthorizedClient (um por client-registration/rota) em
+      # memoria - sem um teto razoavel, sessoes esquecidas se acumulam e
+      # crescem o heap. Ajuste conforme o uso real (tempo entre requisicoes
+      # de um usuario legitimo).
+      timeout: 30m
 
 spring:
   application:
@@ -25,14 +40,17 @@ spring:
           tasks-client:
             provider: keycloak
             client-id: tasks-client
-            client-secret: tasks-secret
+            # Default so para dev local (o realm-export.json de exemplo usa
+            # esse valor). Em producao, SEMPRE via env var (nunca secret em
+            # texto puro versionado) - ex.: TASKS_CLIENT_SECRET=xxxx.
+            client-secret: ${TASKS_CLIENT_SECRET:tasks-secret}
             authorization-grant-type: authorization_code
             scope: openid,task:read
             redirect-uri: "{baseUrl}/login/oauth2/code/{registrationId}"
           billing-client:
             provider: keycloak
             client-id: billing-client
-            client-secret: billing-secret
+            client-secret: ${BILLING_CLIENT_SECRET:billing-secret}
             authorization-grant-type: authorization_code
             scope: openid,billing:read
             redirect-uri: "{baseUrl}/login/oauth2/code/{registrationId}"
@@ -88,12 +106,34 @@ sidecar:
           DELETE: billing:write
 
 management:
+  # Porta separada (nao publicada no docker-compose, igual crud-service e
+  # billing-service) para health/metrics/prometheus: assim eles nao competem
+  # com o SecurityFilterChain de negocio (que exige login OAuth2) nem ficam
+  # expostos publicamente na 8082 so porque alguem quer fazer scraping. Um
+  # scraper de metricas nao sabe fazer login OAuth2 interativo.
+  server:
+    port: 9090
   endpoints:
     web:
       exposure:
-        include: health
+        include: health,prometheus,metrics
+  endpoint:
+    health:
+      show-details: never
+      probes:
+        enabled: true
+  metrics:
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
+        http.client.requests: true
 
 logging:
   level:
-    com.poc.sidecar: DEBUG
+    # INFO por padrao (prod-safe: DEBUG deste pacote loga headers/decisoes de
+    # escopo por requisicao - custo de I/O e risco de vazar dado sensivel em
+    # log sob alto volume). Para depurar, suba so este pacote via env var, ex.:
+    # LOGGING_LEVEL_COM_POC_SIDECAR=DEBUG - sem precisar recompilar/redeploy
+    # em builds que leem env var em runtime.
+    com.poc.sidecar: INFO
     org.springframework.security: INFO

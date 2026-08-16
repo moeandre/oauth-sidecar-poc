@@ -3,13 +3,18 @@ package com.poc.sidecar.proxy;
 import com.poc.sidecar.config.SidecarProperties;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.context.event.EventListener;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.security.oauth2.client.OAuth2AuthorizeRequest;
 import org.springframework.security.oauth2.client.OAuth2AuthorizedClient;
-import org.springframework.security.oauth2.client.web.OAuth2AuthorizedClientRepository;
+import org.springframework.security.oauth2.client.OAuth2AuthorizedClientManager;
 import org.springframework.security.oauth2.core.oidc.user.OidcUser;
 import org.springframework.security.web.savedrequest.HttpSessionRequestCache;
 import org.springframework.security.web.savedrequest.RequestCache;
@@ -29,7 +34,7 @@ import java.util.Set;
 
 /**
  * Unico ponto de entrada exposto para o mundo externo.
- *
+
  * Nem os paths protegidos, nem os backends para os quais eles sao
  * encaminhados, nem o client OAuth2 (client-id) usado, nem a politica de
  * escopo por metodo HTTP estao no codigo: tudo vem de {@link SidecarProperties}
@@ -39,13 +44,13 @@ import java.util.Set;
  * "/api/billing" via "billing-client"/escopos "billing:*"), cada um com seu
  * proprio client Keycloak e sua propria politica - e que novas rotas sejam
  * adicionadas so editando configuracao, sem recompilar.
- *
  * Como cada rota pode usar um client OAuth2 diferente, o authorized client
  * nao da mais para resolver com {@code @RegisteredOAuth2AuthorizedClient}
- * (que exige um registration-id fixo em tempo de compilacao): buscamos na
- * mao, no {@link OAuth2AuthorizedClientRepository}, pelo registration-id da
- * rota casada.
- *
+ * (que exige um registration-id fixo em tempo de compilacao): pedimos na mao,
+ * ao {@link OAuth2AuthorizedClientManager}, pelo registration-id da rota
+ * casada - o que, de brinde, tambem da refresh automatico de token expirado
+ * via refresh_token (ver o bean em SecurityConfig), coisa que buscar direto
+ * no OAuth2AuthorizedClientRepository nao fazia.
  * Se o usuario nao esta autenticado com NENHUM client ainda, o
  * RouteAwareAuthenticationEntryPoint ja cuida disso (redireciona para o
  * client certo antes de chegar aqui). Se o usuario ja esta autenticado mas
@@ -69,8 +74,10 @@ public class ProxyController {
     private record ResolvedRoute(SidecarProperties.Route config, RestClient client) {
     }
 
+    private static final Logger log = LoggerFactory.getLogger(ProxyController.class);
+
     private final List<ResolvedRoute> routes;
-    private final OAuth2AuthorizedClientRepository authorizedClientRepository;
+    private final OAuth2AuthorizedClientManager authorizedClientManager;
     // Sem isso, apos autorizar um client pela primeira vez (ou fazer step-up)
     // o usuario cai na home ("/") em vez de voltar pro path que ele pediu -
     // o request cache e o que faz o Spring "lembrar" pra onde reenviar depois
@@ -78,12 +85,52 @@ public class ProxyController {
     // graca quando quem intercepta e o proprio Spring Security).
     private final RequestCache requestCache = new HttpSessionRequestCache();
 
-    public ProxyController(SidecarProperties properties, OAuth2AuthorizedClientRepository authorizedClientRepository) {
-        this.authorizedClientRepository = authorizedClientRepository;
+    public ProxyController(SidecarProperties properties,
+                            OAuth2AuthorizedClientManager authorizedClientManager,
+                            RestClient.Builder restClientBuilder) {
+        this.authorizedClientManager = authorizedClientManager;
+        // "restClientBuilder" e o Builder auto-configurado pelo Spring Boot: e
+        // ele quem aplica spring.http.client.connect-timeout/read-timeout.
+        // RestClient.create(url) (usado antes) ignora essa configuracao por
+        // completo - os timeouts no application.yml nao tinham efeito nenhum.
+        // .clone() por rota porque .baseUrl() muda o builder e ele nao e
+        // thread-safe pra reuso concorrente sem clonar; cada RestClient e
+        // criado uma unica vez aqui (nao a cada requisicao) e reaproveitado -
+        // RestClient em si e imutavel/thread-safe apos build().
         this.routes = properties.getRoutes().stream()
                 .sorted(Comparator.comparingInt((SidecarProperties.Route r) -> r.getPath().length()).reversed())
-                .map(r -> new ResolvedRoute(r, RestClient.create(r.getBackendBaseUrl())))
+                .map(r -> new ResolvedRoute(r, restClientBuilder.clone().baseUrl(r.getBackendBaseUrl()).build()))
                 .toList();
+    }
+
+    /**
+     * Descoberto revisando performance: a PRIMEIRA requisicao real a um
+     * backend Spring Boot custa bem mais que as seguintes (DispatcherServlet
+     * so inicializa lazy por padrao, JIT ainda frio, etc.) - no crud-service/
+     * billing-service desta PoC, isso chegou a levar ~10s, estourando o
+     * timeout de leitura configurado aqui e derrubando a primeira chamada de
+     * um usuario real com 500. Alem de corrigir na origem (ver
+     * "spring.mvc.servlet.load-on-startup" nos outros servicos), aquecemos
+     * aqui tambem o lado do sidecar (JIT/pool de conexao do proprio
+     * RestClient) com uma chamada best-effort por rota assim que a aplicacao
+     * sobe - falha aqui NUNCA impede o startup, so fica registrada.
+     */
+    @EventListener(ApplicationReadyEvent.class)
+    public void warmUpBackends() {
+        for (ResolvedRoute route : routes) {
+            // Mesma conversao path-do-sidecar -> path-do-backend do metodo
+            // proxy() (strip do prefixo "/api"), pra bater com um endpoint
+            // real (GET) que o backend de fato atende - senao um 404
+            // (ex.: acertar so a raiz "/") pareceria erroneamente uma falha.
+            String downstreamPath = route.config().getPath().replaceFirst("^/api", "");
+            try {
+                route.client().get().uri(downstreamPath).retrieve().toBodilessEntity();
+                log.info("Warm-up OK para a rota {} ({})", route.config().getPath(), route.config().getBackendBaseUrl());
+            } catch (Exception e) {
+                log.warn("Warm-up falhou para a rota {} ({}): {} - primeira requisicao real pode ser mais lenta",
+                        route.config().getPath(), route.config().getBackendBaseUrl(), e.getMessage());
+            }
+        }
     }
 
     @RequestMapping("/api/**")
@@ -103,8 +150,15 @@ public class ProxyController {
         }
 
         String registrationId = route.config().getClientRegistrationId();
-        OAuth2AuthorizedClient authorizedClient =
-                authorizedClientRepository.loadAuthorizedClient(registrationId, authentication, request);
+        OAuth2AuthorizeRequest authorizeRequest = OAuth2AuthorizeRequest.withClientRegistrationId(registrationId)
+                .principal(authentication)
+                .attribute(HttpServletRequest.class.getName(), request)
+                .attribute(HttpServletResponse.class.getName(), response)
+                .build();
+        // Nunca autorizado ainda -> null (igual antes). Ja autorizado mas
+        // expirado e com refresh_token valido -> renova aqui mesmo (chamada
+        // ao Keycloak), sem exigir novo login interativo do usuario.
+        OAuth2AuthorizedClient authorizedClient = authorizedClientManager.authorize(authorizeRequest);
 
         if (authorizedClient == null) {
             // Sessao ja autenticada (por outro client/rota), mas o client desta

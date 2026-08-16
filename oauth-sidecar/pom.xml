@@ -39,6 +39,13 @@
             <artifactId>spring-boot-starter-actuator</artifactId>
         </dependency>
         <dependency>
+            <!-- Sem isso, /actuator/prometheus nao existe: o starter-actuator
+                 sozinho so da /actuator/metrics (formato proprio), nao o
+                 formato que um Prometheus real sabe fazer scrape. -->
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+        </dependency>
+        <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-configuration-processor</artifactId>
             <optional>true</optional>
